@@ -1,0 +1,35 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: mspar
+      POSTGRES_PASSWORD: mspar
+      POSTGRES_DB: mspar
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U mspar -d mspar" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backfill:
+    build: .
+    environment:
+      PGHOST: timescaledb
+      PGPORT: 5432
+      PGUSER: mspar
+      PGPASSWORD: mspar
+      PGDATABASE: mspar
+      DATA_DIR: /data
+    volumes:
+      - ./raw:/data:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: python scripts/ingest/backfill.py
+
+volumes:
+  timescaledb_data:
