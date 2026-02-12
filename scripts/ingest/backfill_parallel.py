@@ -6,7 +6,7 @@ import glob
 from datetime import datetime, timezone
 from multiprocessing import Pool, cpu_count
 import psycopg2
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values, Json
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "10000"))
@@ -20,7 +20,8 @@ PG_CONN = (
 )
 
 INSERT_SQL = """
-    INSERT INTO tweets (ts, id_str, lang, source, screen_name, place) VALUES %s
+    INSERT INTO tweets (ts, id_str, lang, source, screen_name, place,
+        quote_count, favorited, coordinates, entities, friends_count, user_id) VALUES %s
     ON CONFLICT (ts, id_str) DO NOTHING
 """
 
@@ -36,15 +37,23 @@ def parse_ts(obj):
 
 
 def extract_row(obj):
-    """Extrait ts, id_str, lang, source, screen_name, place."""
+    """Extrait ts, id_str, lang, source, screen_name, place, quote_count, favorited, coordinates, entities, friends_count, user_id."""
     user = obj.get("user") or {}
     place = obj.get("place")
     place_name = place.get("name") if place and isinstance(place, dict) else None
+    coords = obj.get("coordinates")
+    entities_data = obj.get("entities")
     return (
         obj.get("lang") or "und",
         (obj.get("source") or "")[:100],
         user.get("screen_name"),
         place_name,
+        obj.get("quote_count"),
+        obj.get("favorited"),
+        Json(coords) if coords and isinstance(coords, dict) else None,
+        Json(entities_data) if entities_data and isinstance(entities_data, dict) else None,
+        user.get("friends_count"),
+        user.get("id"),
     )
 
 
@@ -68,10 +77,27 @@ def ensure_schema(conn):
             source TEXT,
             screen_name TEXT,
             place TEXT,
+            quote_count INT,
+            favorited BOOLEAN,
+            coordinates JSONB,
+            entities JSONB,
+            friends_count INT,
+            user_id BIGINT,
             UNIQUE(ts, id_str)
         );
     """
     )
+    for col, typ in [
+        ("quote_count", "INT"),
+        ("favorited", "BOOLEAN"),
+        ("coordinates", "JSONB"),
+        ("entities", "JSONB"),
+        ("friends_count", "INT"),
+        ("user_id", "BIGINT"),
+    ]:
+        cur.execute(
+            f"ALTER TABLE tweets ADD COLUMN IF NOT EXISTS {col} {typ}"
+        )
     cur.execute(
         """
         SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'tweets';
@@ -113,17 +139,18 @@ def process_files(args):
                 if not id_str:
                     skipped += 1
                     continue
-                lang, source, screen_name, place = extract_row(obj)
-                batch.append((ts, id_str, lang, source, screen_name, place))
+                row = extract_row(obj)
+                batch.append((ts, id_str, *row))
                 if len(batch) >= BATCH_SIZE:
                     execute_values(
-                        cur, INSERT_SQL, batch, template="(%s, %s, %s, %s, %s, %s)"
+                        cur, INSERT_SQL, batch,
+                        template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     )
                     inserted += cur.rowcount
                     conn.commit()
                     batch = []
     if batch:
-        execute_values(cur, INSERT_SQL, batch, template="(%s, %s, %s, %s, %s, %s)")
+        execute_values(cur, INSERT_SQL, batch, template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
         inserted += cur.rowcount
         conn.commit()
     cur.close()
